@@ -179,17 +179,19 @@ class Pool:
 
     async def acquire(self, timeout=None):
         deadline = time.monotonic() + (timeout or _SETTINGS.sandbox_acquire_timeout)
+        if timeout is None:
+            timeout = _SETTINGS.sandbox_acquire_timeout
         for attempt in range(_SETTINGS.sandbox_acquire_retries + 1):
             async with self._lock:
                 runner = self._idle.pop() if self._idle else None
             if runner:
-                pool_wait.observe(time.monotonic() - deadline + (timeout or _SETTINGS.sandbox_acquire_timeout))
+                pool_wait.observe(time.monotonic() - deadline + timeout)
                 pool_size.set(len(self._idle))
                 return _Lease(self, runner)
             remaining = round(deadline - time.monotonic(), 2)
             warn("pool_retry", attempt=attempt, remaining=remaining)
             await asyncio.sleep(_SETTINGS.sandbox_acquire_retry_delay)
-        raise Empty(f"pool empty after {timeout or _SETTINGS.sandbox_acquire_timeout}s")
+        raise Empty(f"pool empty after {timeout}s")
 
     async def release(self, runner):
         async with self._lock:
