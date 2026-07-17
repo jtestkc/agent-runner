@@ -11,8 +11,6 @@ python -m src.agent_runner.worker
 python -m pytest tests/test_core.py -v
 ```
 
-**Sandboxes** — Firecracker (~500ms, prod), Docker (~100ms, fallback), Subprocess (~50ms, dev only).
-
 **Firecracker setup** (needs Linux + KVM):
 ```bash
 sudo bash scripts/build_rootfs.sh
