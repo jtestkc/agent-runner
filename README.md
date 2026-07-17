@@ -1,77 +1,59 @@
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
-
 # Agent Runner
 
-Durable multi-agent orchestration with Temporal and Firecracker microVM isolation.
+Mult-agent system backed by Temporal. Runs untrusted code inside Firecracker VMs (or Docker if KVM isnt available).
 
-## Isolation Model
+## What it does
 
-| Backend | Isolation | Network | Startup | Use Case |
-|---------|-----------|---------|---------|----------|
-| **Firecracker** | Full KVM microVM | `--net none` | ~500ms | Production (recommended) |
-| **Docker** | Container | `--network none` | ~100ms | Fallback when KVM unavailable |
-| **Subprocess** | Process-level | None | ~50ms | Local dev / testing |
-
-Firecracker is preferred because VMs provide stronger isolation than containers — each agent step gets a fresh kernel with no shared syscalls, no host filesystem access, and no network. Docker is a practical fallback on hosts without KVM support (e.g., CI runners). Subprocess has zero isolation and must never be used in production.
-
-## Firecracker Setup
-
-Build the rootfs image and download the kernel before using the Firecracker backend:
-
-```bash
-# Option 1: Build directly on a Linux host (requires debootstrap + root)
-sudo bash scripts/build_rootfs.sh
-
-# Option 2: Build via Docker (no root on host)
-docker build -f scripts/Dockerfile.fc-builder -t fc-builder .
-docker run --rm -v /opt/firecracker:/output fc-builder
-```
-
-This produces `/opt/firecracker/rootfs.ext4` and downloads the kernel to `/opt/firecracker/vmlinux`. The rootfs contains a minimal Ubuntu base with Python 3 and the vsock agent bridge (`scripts/fc_agent.py`) that listens on port 5201 for agent payloads and dispatches them via `dispatch()`.
-
-## Retry & Timeout Strategy
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Initial interval | 1s | Quick retry on transient infra failures |
-| Backoff multiplier | 2x | Standard exponential backoff |
-| Max interval | 30s | Cap to avoid excessive wait |
-| Max attempts | 5 | Fail fast — a stuck agent won't recover after 5 tries |
-| Per-activity timeout | 60s | Agents are stateless simulations; 60s is generous |
-| Loop timeout | 90s | Revision + re-analysis combined must finish in 90s |
-| Pool acquire timeout | 5s | If no VM is free in 5s, fail the activity |
-
-## Multi-Tenant Hardening
-
-- **Rate limiting**: Token bucket (100 req/min per IP) via Redis. Falls back to no limit if Redis is unavailable.
-- **Authentication**: Mock HMAC-SHA256 API key check. Keys are stored as env vars (`API_KEYS`). Set `AUTH_ENABLED=true` to enforce.
-- **Resource isolation**: Each Firecracker VM gets `cpu.max=0.5`, `memory.max=256MiB`, `--pids-limit=128`, and `--read-only` filesystem via cgroups v2.
-- **Idempotency**: `Idempotency-Key` header prevents duplicate workflow starts. In-memory store by default; Redis when `REDIS_URL` is set.
+Takes a prompt, splits it into subtasks, researches, writes a draft, criticises it, and revises until its good enough. All agent steps run in isolated sandboxes with no network.
 
 ## Quick Start
 
 ```bash
-cp .env.example .env
 pip install -r requirements.txt
-
-# Start the API
-python -m src.agent_runner.main
-
-# Start the Temporal worker (separate terminal)
-python -m src.agent_runner.worker
-
-# Run tests
+python -m src.agent_runner.main     # API server
+python -m src.agent_runner.worker   # Temporal worker
 python -m pytest tests/test_core.py -v
 ```
 
-## API Endpoints
+## Sandboxes
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Liveness check |
-| GET | `/ready` | Readiness (Temporal + VM pool) |
+| Backend | Startup | Good for |
+|---------|---------|----------|
+| Firecracker | ~500ms | Prod |
+| Docker | ~100ms | When KVM not around |
+| Subprocess | ~50ms | Local dev |
+
+Firecracker spins up a fresh kernel per step — stronger than containers. Docker works as fallback. Subprocess has zero isolation, dont use in prod.
+
+## Firecracker Setup
+
+```bash
+# needs a linux box with kvm
+sudo bash scripts/build_rootfs.sh
+# or via docker
+docker build -f scripts/Dockerfile.fc-builder -t fc-builder .
+docker run --rm -v /opt/firecracker:/output fc-builder
+```
+
+## Retries & Timeouts
+
+- Activity timeout: 60s
+- Max retries: 5 (1s, 2s, 4s, 8s, 16s backoff)
+- Pool wait: 5s then fail
+
+## Hardening
+
+- Rate limit: 100 req/min per IP (Redis, falls back to unlimited)
+- API key auth: toggle with `AUTH_ENABLED`, keys from `API_KEYS` env
+- Idempotency: `Idempotency-Key` header prevents dupes
+
+## Endpoints
+
+| Method | Path | What |
+|--------|------|------|
+| GET | `/health` | Alive? |
+| GET | `/ready` | Temporal + pool ready? |
 | POST | `/run` | Start a workflow |
-| GET | `/run/{id}/status` | Poll workflow status |
-| GET | `/run/{id}/stream` | SSE event stream |
-| GET | `/metrics` | Prometheus metrics |
+| GET | `/run/{id}/status` | Check status |
+| GET | `/run/{id}/stream` | SSE events |
+| GET | `/metrics` | Prometheus |
