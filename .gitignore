@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv-stamp
+.env
+agent-audit/
+.DS_Store
+api_out.txt
+api_err.txt
+*.txt~
+check/
