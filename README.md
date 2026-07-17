@@ -15,6 +15,21 @@ Durable multi-agent orchestration with Temporal and Firecracker microVM isolatio
 
 Firecracker is preferred because VMs provide stronger isolation than containers — each agent step gets a fresh kernel with no shared syscalls, no host filesystem access, and no network. Docker is a practical fallback on hosts without KVM support (e.g., CI runners). Subprocess has zero isolation and must never be used in production.
 
+## Firecracker Setup
+
+Build the rootfs image and download the kernel before using the Firecracker backend:
+
+```bash
+# Option 1: Build directly on a Linux host (requires debootstrap + root)
+sudo bash scripts/build_rootfs.sh
+
+# Option 2: Build via Docker (no root on host)
+docker build -f scripts/Dockerfile.fc-builder -t fc-builder .
+docker run --rm -v /opt/firecracker:/output fc-builder
+```
+
+This produces `/opt/firecracker/rootfs.ext4` and downloads the kernel to `/opt/firecracker/vmlinux`. The rootfs contains a minimal Ubuntu base with Python 3 and the vsock agent bridge (`scripts/fc_agent.py`) that listens on port 5201 for agent payloads and dispatches them via `dispatch()`.
+
 ## Retry & Timeout Strategy
 
 | Parameter | Value | Rationale |

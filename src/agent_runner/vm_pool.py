@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -82,39 +84,124 @@ async def _docker(agent, payload):
     return json.loads(stdout.decode())
 
 
+async def _fc_api(sock_path, method, path, body=None):
+    reader, writer = await asyncio.open_unix_connection(sock_path)
+    try:
+        enc = json.dumps(body).encode() if body else b""
+        req = f"{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(enc)}\r\nContent-Type: application/json\r\n\r\n".encode() + enc
+        writer.write(req)
+        await writer.drain()
+        head = b""
+        while b"\r\n\r\n" not in head:
+            c = await reader.read(4096)
+            if not c:
+                raise ExecError("fc API connection lost")
+            head += c
+        head_str = head.split(b"\r\n\r\n")[0].decode()
+        status = int(head_str.split(" ")[1])
+        cl = 0
+        for line in head_str.split("\r\n"):
+            if line.lower().startswith("content-length:"):
+                cl = int(line.split(":")[1].strip())
+        body_bytes = head[head.index(b"\r\n\r\n") + 4:]
+        while len(body_bytes) < cl:
+            c = await reader.read(4096)
+            if not c:
+                break
+            body_bytes += c
+        return status, body_bytes.decode()
+    finally:
+        writer.close()
+
+
 async def _firecracker(agent, payload):
+    timeout = _SETTINGS.agent_timeout + 30
     with tempfile.TemporaryDirectory() as tmp:
+        api_path = f"{tmp}/fc.sock"
+        vsock_path = f"{tmp}/v.sock"
+
         proc = await asyncio.create_subprocess_exec(
             "firecracker",
             "--api-sock",
-            f"{tmp}/firecracker.sock",
-            "--config-file",
-            "-",
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            api_path,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        await proc.communicate(
-            json.dumps(
-                {
-                    "boot-source": {
-                        "kernel_image_path": "/opt/firecracker/vmlinux",
-                        "boot_args": "console=ttyS0 reboot=k panic=1 pci=off",
-                    },
-                    "drives": [
-                        {
-                            "drive_id": "rootfs",
-                            "path_on_host": "/opt/firecracker/rootfs.ext4",
-                            "is_root_device": True,
-                            "is_read_only": True,
-                        }
-                    ],
-                    "machine-config": {"vcpu_count": 1, "mem_size_mib": 256, "smt": False},
-                }
-            ).encode()
-        )
-        crashes.labels(agent=agent).inc() if proc.returncode else None
-        raise ExecError("Firecracker needs built rootfs with vsock I/O")
+
+        try:
+            for _ in range(50):
+                if os.path.exists(api_path):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise ExecError("fc API socket never appeared")
+
+            async def _put(path, body):
+                s, msg = await _fc_api(api_path, "PUT", path, body)
+                if s not in (200, 204):
+                    raise ExecError(f"fc {path} failed ({s}): {msg}")
+
+            await _put("/boot-source", {
+                "kernel_image_path": "/opt/firecracker/vmlinux",
+                "boot_args": "console=ttyS0 reboot=k panic=1 pci=off",
+            })
+            await _put("/drives", {
+                "drive_id": "rootfs",
+                "path_on_host": "/opt/firecracker/rootfs.ext4",
+                "is_root_device": True,
+                "is_read_only": True,
+            })
+            await _put("/vsock", {"guest_cid": 3, "uds_path": vsock_path})
+            await _put("/machine-config", {
+                "vcpu_count": 1,
+                "mem_size_mib": 256,
+                "smt": False,
+            })
+            await _put("/actions", {"action_type": "InstanceStart"})
+
+            for _ in range(100):
+                if os.path.exists(vsock_path):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise ExecError("vsock socket never appeared")
+
+            vr, vw = await asyncio.wait_for(
+                asyncio.open_unix_connection(vsock_path), timeout=10
+            )
+
+            data = json.dumps({"agent": agent, "payload": payload}).encode()
+            hdr = struct.pack(
+                "<QQIIIIHHII",
+                2, 3, 5201, 1024, len(data), 1, 5, 0, 65536, 0,
+            )
+            body = hdr + data
+            vw.write(struct.pack("<I", len(body)) + body)
+            await vw.drain()
+
+            raw = await asyncio.wait_for(vr.readexactly(4), timeout=timeout)
+            rlen = struct.unpack("<I", raw)[0]
+            rdata = await asyncio.wait_for(vr.readexactly(rlen), timeout=timeout)
+            result = json.loads(rdata[44:].decode())
+
+            vw.close()
+            try:
+                await _put("/actions", {"action_type": "InstanceHalt"})
+            except ExecError:
+                pass
+
+            return result
+
+        except (asyncio.TimeoutError, ConnectionError, OSError, json.JSONDecodeError) as e:
+            crashes.labels(agent=agent).inc()
+            raise ExecError(f"{agent}: {e}") from e
+        finally:
+            proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
 
 
 _RUNNERS = {

@@ -1,0 +1,21 @@
+FROM ubuntu:noble AS builder
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+    debootstrap \
+    genext2fs \
+    wget \
+    xz-utils \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY build_rootfs.sh /build/
+COPY fc_agent.py /build/
+COPY agent_worker.py /build/
+COPY ../src/agent_runner /build/src/agent_runner/
+
+ENV ROOTFS_OUT=/output/rootfs.ext4
+ENV KERNEL_OUT=/output/vmlinux
+
+VOLUME /output
+ENTRYPOINT ["/build/build_rootfs.sh"]

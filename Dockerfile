@@ -5,7 +5,9 @@ ENV PYTHONUNBUFFERED=1 \
     AGENT_RUNNER_sandbox_backend=docker
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates docker-cli && \
+        ca-certificates curl && \
+    curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-cli.tgz | \
+        tar xz -C /usr/local/bin --strip-components=1 docker/docker && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
