@@ -1,0 +1,16 @@
+FROM python:3.13-alpine
+
+WORKDIR /opt/agent-runner
+
+COPY src/agent_runner/__init__.py ./agent_runner/__init__.py
+COPY src/agent_runner/models.py ./agent_runner/models.py
+COPY src/agent_runner/agents/__init__.py ./agent_runner/agents/__init__.py
+COPY src/agent_runner/agents/logic.py ./agent_runner/agents/logic.py
+COPY scripts/agent_worker.py ./agent_worker.py
+
+RUN pip install --no-cache-dir pydantic
+
+RUN adduser -D -u 1000 sandbox && chown -R sandbox:sandbox /opt/agent-runner
+USER sandbox
+
+ENTRYPOINT ["python", "/opt/agent-runner/agent_worker.py"]

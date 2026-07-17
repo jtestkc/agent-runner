@@ -1,0 +1,55 @@
+services:
+  temporal:
+    image: temporalio/auto-setup:1.25.1
+    entrypoint: ["sh", "-c"]
+    command:
+      - "temporal server start-dev --ip 0.0.0.0 --log-level warn --db-filename /tmp/temporal.db"
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: agent-runner/sandbox:latest
+
+  agent-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - AGENT_RUNNER_ROLE=api
+      - AGENT_RUNNER_temporal_address=temporal:7233
+      - AGENT_RUNNER_sandbox_backend=docker
+      - AGENT_RUNNER_api_keys=${AGENT_RUNNER_API_KEYS:-dev-key-1234}
+      - AGENT_RUNNER_redis_url=${AGENT_RUNNER_REDIS_URL:-redis://redis:6379/0}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    ports:
+      - "8080:8080"
+    depends_on:
+      - temporal
+      - redis
+      - sandbox
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  agent-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - AGENT_RUNNER_ROLE=worker
+      - AGENT_RUNNER_temporal_address=temporal:7233
+      - AGENT_RUNNER_sandbox_backend=docker
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    depends_on:
+      - temporal
+      - sandbox
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
